@@ -1,0 +1,150 @@
+---
+title: "Work"
+format: html
+editor: visual
+---
+
+
+<!-- This is 2017-2018 data from -->
+```{r}
+# Install packages (only need to do this once)
+install.packages(c("tidyverse", "haven", "survey", "janitor", "labelled", "srvyr","dyplr"))
+
+# Load them each session
+library(tidyverse)
+library(haven)     # for reading SAS XPT files
+library(janitor)   # for cleaning column names
+library(labelled)  # for working with labelled NHANES variables
+library(survey)    # for complex survey design
+library(srvyr)     # tidy interface for survey
+library(dplyr)
+```
+
+
+
+```{r}
+demo <- read_xpt("DEMO_J.xpt") %>% clean_names()
+diet <- read_xpt("DR1IFF_J.xpt") %>% clean_names()
+depression <- read_xpt("DPQ_J.xpt") %>% clean_names()
+body <- read_xpt("BMX_J.xpt") %>% clean_names()
+bp <- read_xpt("BPX_J.xpt") %>% clean_names()
+
+```
+
+```{r}
+names(demo)
+names(diet)
+names(depression)
+names(body)
+names(bp)
+
+```
+```{r}
+
+
+# Demographics
+demo_sub <- demo %>%
+  select(seqn, riagendr, ridageyr, ridreth1, dmdeduc2, dmdmartl, indfmpir)
+
+# Diet — note: variable names are dr1ikcal, dr1iprot, dr1icarb, dr1itfat
+diet_sub <- diet %>%
+  select(seqn, dr1ikcal, dr1iprot, dr1icarb, dr1itfat)
+
+# Depression (PHQ-9)
+depression_sub <- depression %>%
+  select(seqn, dpq010:dpq090) %>%
+  mutate(phq9_total = rowSums(across(dpq010:dpq090), na.rm = TRUE))
+
+# Body measures
+body_sub <- body %>%
+  select(seqn, bmxwt, bmxht, bmxbmi)
+
+# Blood pressure
+bp_sub <- bp %>%
+  select(seqn, bpxsy1, bpxsy2, bpxsy3, bpxsy4,
+               bpxdi1, bpxdi2, bpxdi3, bpxdi4) %>%
+  mutate(
+    sbp = rowMeans(across(c(bpxsy1, bpxsy2, bpxsy3, bpxsy4)), na.rm = TRUE),
+    dbp = rowMeans(across(c(bpxdi1, bpxdi2, bpxdi3, bpxdi4)), na.rm = TRUE)
+  )
+
+
+```
+
+
+```{r}
+nhanes_combined <- demo_sub %>%
+  left_join(diet_sub, by = "seqn") %>%
+  left_join(depression_sub, by = "seqn") %>%
+  left_join(body_sub, by = "seqn") %>%
+  left_join(bp_sub, by = "seqn")
+
+```
+
+
+```{r}
+glimpse(nhanes_combined)
+summary(nhanes_combined)
+
+```
+
+```{r}
+nhanes_clean <- nhanes_combined %>%
+  mutate(
+    # ---- Gender ----
+    gender = case_when(
+      riagendr == 1 ~ "Male",
+      riagendr == 2 ~ "Female",
+      TRUE ~ NA_character_
+    ),
+    
+    # ---- Race/Ethnicity (RIDRETH1 codes) ----
+    race = case_when(
+      ridreth1 == 1 ~ "Mexican American",
+      ridreth1 == 2 ~ "Other Hispanic",
+      ridreth1 == 3 ~ "Non-Hispanic White",
+      ridreth1 == 4 ~ "Non-Hispanic Black",
+      ridreth1 == 5 ~ "Other Race/Multi-Racial",
+      TRUE ~ NA_character_
+    ),
+    
+    # ---- Education (DMDEDUC2 codes: adults 20+) ----
+    education = case_when(
+      dmdeduc2 == 1 ~ "Less than 9th grade",
+      dmdeduc2 == 2 ~ "9-11th grade (no diploma)",
+      dmdeduc2 == 3 ~ "High school graduate/GED",
+      dmdeduc2 == 4 ~ "Some college/AA degree",
+      dmdeduc2 == 5 ~ "College graduate or above",
+      TRUE ~ NA_character_
+    ),
+    
+    # ---- Marital Status (DMDMARTL codes) ----
+    marital_status = case_when(
+      dmdmartl == 1 ~ "Married",
+      dmdmartl == 2 ~ "Widowed",
+      dmdmartl == 3 ~ "Divorced",
+      dmdmartl == 4 ~ "Separated",
+      dmdmartl == 5 ~ "Never married",
+      dmdmartl == 6 ~ "Living with partner",
+      TRUE ~ NA_character_
+    )
+  )
+
+```
+
+```{r}
+nhanes_clean <- nhanes_clean %>%
+  select(seqn, gender, age = ridageyr, race, education, marital_status,
+         indfmpir, dr1ikcal, dr1iprot, dr1icarb, dr1itfat,
+         phq9_total, bmxbmi, sbp, dbp)
+
+```
+
+```{r}
+glimpse(nhanes_clean)
+summary(nhanes_clean)
+
+```
+
+
+

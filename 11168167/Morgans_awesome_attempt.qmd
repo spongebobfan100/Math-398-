@@ -1,0 +1,365 @@
+---
+title: "Work"
+format: html
+editor: visual
+---
+
+```{r}
+
+
+
+knitr::opts_chunk$set(
+echo = TRUE, message = FALSE, warning = FALSE,
+fig.align = "center", fig.width = 7, fig.height = 5
+)
+```
+
+```{r}
+library(tidyverse)
+library(haven)     # read_xpt
+library(janitor)   # clean_names
+library(labelled)  # support for labelled vars
+library(survey)    # survey designs/models
+library(srvyr)     # tidy survey interface
+library(splines)   # ns() in models
+
+```
+
+```{r}
+paths <- list(
+demo = "DEMO_J.xpt",
+dpq = "DPQ_J.xpt",
+dr1i = "DR1IFF_J.xpt",
+dr1t = "DR1TOT_J.xpt",
+bmx = "BMX_J.xpt",
+bpx = "BPX_J.xpt",
+smq = "SMQ_J.xpt",
+paq = "PAQ_J.xpt",
+alq = "ALQ_J.xpt",
+slq = "SLQ_J.xpt"
+)
+```
+
+```{r}
+demo <- read_xpt(paths$demo) %>% clean_names()
+dpq  <- read_xpt(paths$dpq)  %>% clean_names()
+dr1i <- read_xpt(paths$dr1i) %>% clean_names()   # individual foods, day 1
+dr1t <- read_xpt(paths$dr1t) %>% clean_names()   # day 1 totals (person-level) & weights
+bmx  <- read_xpt(paths$bmx)  %>% clean_names()
+bpx  <- read_xpt(paths$bpx)  %>% clean_names()
+smq  <- read_xpt(paths$smq)  %>% clean_names()
+paq  <- read_xpt(paths$paq)  %>% clean_names()
+alq  <- read_xpt(paths$alq)  %>% clean_names()
+slq  <- read_xpt(paths$slq)  %>% clean_names()
+
+```
+
+```{r}
+# Diet totals from individual foods (dr1i). If you prefer using DR1TOT variables
+
+# for macros, keep this; otherwise you could take energy from DR1TOT directly.
+
+diet_totals <- dr1i %>%
+group_by(seqn) %>%
+summarise(
+dr1tkcal = sum(dr1ikcal, na.rm = TRUE),  # total kcal
+dr1tprot = sum(dr1iprot, na.rm = TRUE),  # g
+dr1tcarb = sum(dr1icarb, na.rm = TRUE),  # g
+dr1ttfat = sum(dr1itfat, na.rm = TRUE),  # g
+.groups = "drop"
+) %>%
+
+# Attach Day-1 dietary weight from DR1TOT
+
+left_join(dr1t %>% select(seqn, wtdrd1), by = "seqn")
+
+# Demographics: keep strata/PSU and interview weight (fallback)
+
+demo_sub <- demo %>%
+select(seqn, ridageyr, riagendr, ridreth3, indfmpir,
+dmdeduc2, dmdmartl, sdmvstra, sdmvpsu, wtint2yr)
+
+# PHQ-9: 7/9 => NA, sum to total and dep10 flag
+
+dpq_sub <- dpq %>%
+select(seqn, dpq010:dpq090) %>%
+mutate(across(everything(), ~ na_if(., 7)),
+across(everything(), ~ na_if(., 9))) %>%
+mutate(
+phq9_total = rowSums(across(dpq010:dpq090), na.rm = FALSE),
+dep10      = as.integer(phq9_total >= 10)
+) %>%
+select(seqn, phq9_total, dep10)
+
+# Body measures
+
+bmx_sub <- bmx %>% select(seqn, bmxbmi)
+
+# Blood pressure means
+
+bpx_sub <- bpx %>%
+mutate(
+sbp = rowMeans(across(bpxsy1:bpxsy4), na.rm = TRUE),
+dbp = rowMeans(across(bpxdi1:bpxdi4), na.rm = TRUE)
+) %>%
+select(seqn, sbp, dbp)
+
+# Smoking category
+
+smq_sub <- smq %>%
+select(seqn, smq020, smq040) %>%
+mutate(
+smq020 = ifelse(smq020 %in% c(7,9), NA, smq020),
+smq040 = ifelse(smq040 %in% c(7,9), NA, smq040),
+smoker_cat = case_when(
+smq020 == 1 & smq040 %in% c(1,2) ~ "Current",
+smq020 == 1 & smq040 == 3       ~ "Former",
+smq020 == 2                     ~ "Never",
+TRUE                            ~ NA_character_
+) %>% factor(levels = c("Never","Former","Current"))
+) %>%
+select(seqn, smoker_cat)
+
+# Physical activity + sedentary
+
+paq_sub <- paq %>%
+select(seqn, paq655, pad660, paq670, pad675, pad680) %>%
+mutate(
+across(c(paq655, paq670), ~ ifelse(. %in% c(77,99), NA, .)),
+across(c(pad660, pad675, pad680), ~ ifelse(. %in% c(7777,9999), NA, .)),
+vig_min_wk  = paq655 * pad660,
+mod_min_wk  = paq670 * pad675,
+mvpa_min_wk = vig_min_wk + mod_min_wk
+) %>%
+select(seqn, mvpa_min_wk, pad680)
+
+# Alcohol (robust construction)
+
+need_alq <- c("alq101","alq110","alq120q","alq120u","alq130","alq141q","alq141u","alq151","alq121")
+for (v in need_alq) if (!v %in% names(alq)) alq[[v]] <- NA_real_
+
+alq_sub <- alq %>%
+select(seqn, all_of(need_alq)) %>%
+mutate(across(everything(), ~ ifelse(. %in% c(7,9,77,99,777,999,7777,9999), NA, .))) %>%
+mutate(
+ever_drink = case_when(
+alq101 == 1 ~ "Yes",
+alq101 == 2 ~ "No",
+is.na(alq101) & alq151 == 1 ~ "Yes",
+is.na(alq101) & alq151 == 2 ~ "No",
+TRUE ~ NA_character_
+),
+current_drinker = case_when(
+alq110 == 1 ~ "Yes",
+alq110 == 2 ~ "Former",
+!is.na(alq120q) & alq120q > 0 ~ "Yes",
+!is.na(alq121)  & alq121  > 0 ~ "Yes",
+alq101 == 2 ~ "Never",
+TRUE ~ NA_character_
+) %>% factor(levels = c("Never","Former","Yes"))
+) %>%
+select(seqn, current_drinker)
+
+# Sleep hours & categories (handles multiple variable names)
+
+sleep_candidates <- c("sld012", "sld010h", "sld010")
+sleep_var <- intersect(sleep_candidates, names(slq))[1]
+
+slq_sub <-
+if (is.na(sleep_var)) {
+tibble(seqn = slq$seqn, sleep_hours = NA_real_, sleep_cat = factor(NA_character_))
+} else {
+slq %>%
+select(seqn, sleep_raw = all_of(sleep_var)) %>%
+mutate(
+sleep_hours = suppressWarnings(as.numeric(sleep_raw)),
+sleep_hours = ifelse(sleep_hours %in% c(7, 9, 77, 99), NA, sleep_hours),
+sleep_hours = ifelse(!is.na(sleep_hours) & between(sleep_hours, 3, 14), sleep_hours, NA_real_),
+sleep_cat = case_when(
+is.na(sleep_hours) ~ NA_character_,
+sleep_hours < 7    ~ "Short (<7h)",
+sleep_hours <= 9   ~ "Adequate (7–9h)",
+sleep_hours > 9    ~ "Long (>9h)"
+) %>% factor(levels = c("Short (<7h)","Adequate (7–9h)","Long (>9h)"))
+) %>%
+select(seqn, sleep_hours, sleep_cat)
+}
+
+```
+
+```{r}
+dat <- demo_sub %>%
+left_join(diet_totals, by = "seqn") %>%   # brings wtdrd1
+left_join(dpq_sub,     by = "seqn") %>%
+left_join(bmx_sub,     by = "seqn") %>%
+left_join(bpx_sub,     by = "seqn") %>%
+left_join(smq_sub,     by = "seqn") %>%
+left_join(paq_sub,     by = "seqn") %>%
+left_join(alq_sub,     by = "seqn") %>%
+left_join(slq_sub,     by = "seqn") %>%
+mutate(
+# fallback survey weight if dietary weight missing
+wt_svy = coalesce(wtdrd1, wtint2yr),
+gender = factor(case_when(riagendr == 1 ~ "Male",
+riagendr == 2 ~ "Female")),
+race = factor(case_when(
+ridreth3 == 1 ~ "Mexican American",
+ridreth3 == 2 ~ "Other Hispanic",
+ridreth3 == 3 ~ "Non-Hispanic White",
+ridreth3 == 4 ~ "Non-Hispanic Black",
+ridreth3 == 6 ~ "Non-Hispanic Asian",
+ridreth3 == 7 ~ "Other/Multi"
+)),
+education = case_when(
+dmdeduc2 == 1 ~ "Less than 9th grade",
+dmdeduc2 == 2 ~ "9–11th grade (no diploma)",
+dmdeduc2 == 3 ~ "HS/GED",
+dmdeduc2 == 4 ~ "Some college/AA",
+dmdeduc2 == 5 ~ "College+",
+TRUE ~ NA_character_
+),
+marital_status = case_when(
+dmdmartl == 1 ~ "Married",
+dmdmartl == 2 ~ "Widowed",
+dmdmartl == 3 ~ "Divorced",
+dmdmartl == 4 ~ "Separated",
+dmdmartl == 5 ~ "Never married",
+dmdmartl == 6 ~ "Living with partner",
+TRUE ~ NA_character_
+)
+)
+
+glimpse(dat)
+
+```
+
+```{r}
+adult <- dat %>%
+filter(ridageyr >= 20) %>%
+mutate(
+# Macro kcal & percents
+kcal_from_prot = dr1tprot * 4,
+kcal_from_carb = dr1tcarb * 4,
+kcal_from_fat  = dr1ttfat * 9,
+pct_prot = if_else(!is.na(dr1tkcal) & dr1tkcal > 0, 100*kcal_from_prot/dr1tkcal, NA_real_),
+pct_carb = if_else(!is.na(dr1tkcal) & dr1tkcal > 0, 100*kcal_from_carb/dr1tkcal, NA_real_),
+pct_fat  = if_else(!is.na(dr1tkcal) & dr1tkcal > 0, 100*kcal_from_fat /dr1tkcal, NA_real_),
+
+# Diet type
+diet_type = case_when(
+  !is.na(pct_carb) & !is.na(pct_fat) & pct_carb < 45 & pct_fat >= 30 ~ "Lower-carb",
+  !is.na(pct_carb) & !is.na(pct_fat) & pct_fat  < 30 & pct_carb >= 45 ~ "Lower-fat",
+  !is.na(pct_carb) & !is.na(pct_fat)                                 ~ "Mixed",
+  TRUE ~ NA_character_
+) %>% factor(levels = c("Lower-fat","Mixed","Lower-carb")),
+
+# PHQ-9 category
+phq9_cat = case_when(
+  is.na(phq9_total)  ~ NA_character_,
+  phq9_total < 5     ~ "None/Minimal (0–4)",
+  phq9_total < 10    ~ "Mild (5–9)",
+  phq9_total < 15    ~ "Moderate (10–14)",
+  phq9_total < 20    ~ "Mod. severe (15–19)",
+  TRUE               ~ "Severe (20–27)"
+) %>% factor(levels = c("None/Minimal (0–4)",
+                        "Mild (5–9)",
+                        "Moderate (10–14)",
+                        "Mod. severe (15–19)",
+                        "Severe (20–27)")),
+
+# PA categories (CDC/WHO)
+pa_cat = case_when(
+  is.na(mvpa_min_wk)                 ~ NA_character_,
+  mvpa_min_wk < 150                  ~ "Inactive (<150 min/wk)",
+  mvpa_min_wk >= 150 & mvpa_min_wk < 300 ~ "Active (150–299 min/wk)",
+  mvpa_min_wk >= 300                 ~ "Highly active (≥300 min/wk)"
+) %>% factor(levels = c("Inactive (<150 min/wk)",
+                        "Active (150–299 min/wk)",
+                        "Highly active (≥300 min/wk)")),
+
+# Sedentary category
+pad680 = ifelse(pad680 %in% c(7777, 9999), NA, pad680),
+sedentary_hrs = pad680 / 60,
+sed_cat = case_when(
+  is.na(sedentary_hrs) ~ NA_character_,
+  sedentary_hrs < 6    ~ "Low (<6 h/day)",
+  sedentary_hrs < 9    ~ "Moderate (6–8.9 h/day)",
+  TRUE                 ~ "High (≥9 h/day)"
+) %>% factor(levels = c("Low (<6 h/day)",
+                        "Moderate (6–8.9 h/day)",
+                        "High (≥9 h/day)")),
+
+# PA guideline
+meets_150 = case_when(
+  is.na(mvpa_min_wk)      ~ NA_character_,
+  mvpa_min_wk >= 150      ~ "≥150 min",
+  TRUE                    ~ "<150 min"
+)
+)
+# Quick sanity
+
+stopifnot(all(c("dep10","smoker_cat","current_drinker") %in% names(adult)))
+
+```
+
+```{r}
+nhanes_plot <- adult %>%
+transmute(
+gender, phq9_total, ridageyr,
+dr1tkcal, bmxbmi, sbp, dbp,
+pct_prot, pct_carb, pct_fat,
+smoker_cat, current_drinker, mvpa_min_wk,
+sleep_cat, diet_type, dep10, pa_cat, sed_cat
+) %>%
+filter(
+between(ridageyr, 18, 80) | is.na(ridageyr),
+is.na(dr1tkcal) | between(dr1tkcal, 500, 5000),
+is.na(bmxbmi)   | between(bmxbmi, 12, 65),
+is.na(sbp)      | between(sbp, 70, 250),
+is.na(dbp)      | between(dbp, 40, 160)
+) %>%
+mutate(
+age_group = cut(ridageyr, breaks = c(18,30,45,60,80),
+include.lowest = TRUE, right = FALSE,
+labels = c("18–29","30–44","45–59","60–79"))
+)
+
+```
+
+```{r}
+ggplot(nhanes_plot, aes(x = gender, y = phq9_total, fill = gender)) +
+geom_violin(alpha = 0.25, na.rm = TRUE, trim = TRUE) +
+geom_boxplot(width = 0.2, outlier.alpha = 0.2, na.rm = TRUE) +
+labs(title = "PHQ-9 score distribution by gender",
+x = NULL, y = "PHQ-9 total score (0–27)") +
+theme_minimal(base_size = 12) +
+theme(legend.position = "none")
+
+```
+
+```{r}
+ggplot(adult %>% filter(!is.na(smoker_cat)),
+aes(x = smoker_cat, y = mvpa_min_wk, fill = smoker_cat)) +
+geom_boxplot(outlier.alpha = 0.2, na.rm = TRUE) +
+coord_cartesian(ylim = c(0, 1000)) +
+labs(title = "Weekly MVPA (mins) by Smoking Status (Adults ≥20y)",
+x = NULL, y = "MVPA minutes/week") +
+theme_minimal(base_size = 12) +
+theme(legend.position = "none")
+
+```
+
+```{r}
+ggplot(adult %>% filter(!is.na(sleep_cat), !is.na(mvpa_min_wk)),
+aes(x = sleep_cat, y = mvpa_min_wk, fill = sleep_cat)) +
+geom_boxplot(outlier.alpha = 0.25, width = 0.6, color = "gray40") +
+coord_cartesian(ylim = c(0, 1500)) +
+labs(
+title = "Weekly MVPA by Sleep Category (Adults ≥20y)",
+x = NULL, y = "MVPA minutes per week"
+) +
+theme_minimal(base_size = 13) +
+theme(legend.position = "none",
+axis.text.x = element_text(size = 11))
+
+```
